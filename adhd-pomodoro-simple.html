@@ -1,0 +1,654 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>アイドリングタイマー</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#6366f1">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="ポモドーロ">
+</head>
+<body>
+  <div id="root"></div>
+  
+  <script type="text/babel">
+    const { useState, useEffect, useRef } = React;
+
+    const ADHDPomodoroTimer = () => {
+      const [screen, setScreen] = useState('initial');
+      const [seconds, setSeconds] = useState(0);
+      const [workStartTime, setWorkStartTime] = useState(null);
+      const [soundEnabled, setSoundEnabled] = useState(true);
+      const [stats, setStats] = useState(null);
+      const [sessions, setSessions] = useState({});
+      const [webhookUrl, setWebhookUrl] = useState('');
+      const [webhookInput, setWebhookInput] = useState('');
+      const [showDiscordSettings, setShowDiscordSettings] = useState(false);
+      const [notificationMessage, setNotificationMessage] = useState(null);
+      const intervalRef = useRef(null);
+
+      // localStorage使用
+      const storage = {
+        get: (key) => {
+          const value = localStorage.getItem(key);
+          return value ? Promise.resolve({ value }) : Promise.reject(new Error('Key not found'));
+        },
+        set: (key, value) => {
+          localStorage.setItem(key, value);
+          return Promise.resolve();
+        }
+      };
+
+      useEffect(() => {
+        loadData();
+      }, []);
+
+      const loadData = async () => {
+        try {
+          const statsData = await storage.get('stats');
+          if (statsData) {
+            setStats(JSON.parse(statsData.value));
+          } else {
+            setStats({ totalTime: 0, lastWorkDate: null, streak: 0 });
+          }
+
+          try {
+            const webhookData = await storage.get('discord-webhook-url');
+            if (webhookData) {
+              const url = webhookData.value;
+              setWebhookUrl(url);
+              setWebhookInput(url);
+            }
+          } catch (e) {}
+
+          const sessionsData = {};
+          for (let i = 0; i < 7; i++) {
+            const date = new Date();
+            date.setDate(date.getDate() - i);
+            const dateKey = formatDate(date);
+            try {
+              const sessionData = await storage.get(`sessions:${dateKey}`);
+              if (sessionData) {
+                sessionsData[dateKey] = JSON.parse(sessionData.value);
+              }
+            } catch (e) {}
+          }
+          setSessions(sessionsData);
+        } catch (error) {
+          console.error('データ読み込みエラー:', error);
+          setStats({ totalTime: 0, lastWorkDate: null, streak: 0 });
+        }
+      };
+
+      const formatDate = (date) => {
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, '0');
+        const day = String(date.getDate()).padStart(2, '0');
+        return `${year}-${month}-${day}`;
+      };
+
+      const formatTime = (totalSeconds) => {
+        const hours = Math.floor(totalSeconds / 3600);
+        const minutes = Math.floor((totalSeconds % 3600) / 60);
+        const secs = totalSeconds % 60;
+        
+        if (hours > 0) {
+          return `${hours}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+        }
+        return `${minutes}:${String(secs).padStart(2, '0')}`;
+      };
+
+      const playBeep = () => {
+        if (!soundEnabled) return;
+        
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const oscillator = audioContext.createOscillator();
+        const gainNode = audioContext.createGain();
+        
+        oscillator.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+        
+        oscillator.frequency.value = 800;
+        oscillator.type = 'sine';
+        
+        gainNode.gain.setValueAtTime(0.3, audioContext.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.01, audioContext.currentTime + 0.3);
+        
+        oscillator.start(audioContext.currentTime);
+        oscillator.stop(audioContext.currentTime + 0.3);
+      };
+
+      const showNotification = (message, type = 'success') => {
+        setNotificationMessage({ message, type });
+        setTimeout(() => {
+          setNotificationMessage(null);
+        }, 3000);
+      };
+
+      const sendToDiscord = async (sessionMinutes, todayTotalMinutes, isTest = false, customUrl = null) => {
+        const urlToUse = customUrl || webhookUrl;
+        if (!urlToUse) return;
+
+        const now = new Date();
+        const dateTimeStr = `${now.getFullYear()}/${String(now.getMonth() + 1).padStart(2, '0')}/${String(now.getDate()).padStart(2, '0')} ${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+
+        const payload = {
+          content: isTest 
+            ? `【テストメッセージ】Discord連携が正しく設定されています✓`
+            : `【作業記録】今日の累積: ${todayTotalMinutes}分\n今回のセッション: ${sessionMinutes}分`,
+          embeds: [{
+            title: isTest ? "🧪 テスト送信" : "📊 作業記録",
+            color: 5814783,
+            fields: isTest ? [
+              { name: "ステータス", value: "接続成功", inline: false },
+              { name: "送信日時", value: dateTimeStr, inline: false }
+            ] : [
+              { name: "今日の累積時間", value: `${todayTotalMinutes}分`, inline: true },
+              { name: "今回のセッション", value: `${sessionMinutes}分`, inline: true },
+              { name: "記録日時", value: dateTimeStr, inline: false }
+            ]
+          }]
+        };
+
+        try {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+          const response = await fetch(urlToUse, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify(payload),
+            signal: controller.signal
+          });
+
+          clearTimeout(timeoutId);
+
+          if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+          }
+
+          if (isTest) {
+            showNotification('テスト送信に成功しました', 'success');
+          } else {
+            showNotification('Discordに送信しました', 'success');
+          }
+        } catch (error) {
+          console.error('Discord送信エラー:', error);
+          
+          if (error.name === 'AbortError') {
+            showNotification('送信がタイムアウトしました', 'error');
+          } else {
+            showNotification(`Discord送信に失敗: ${error.message}`, 'error');
+          }
+        }
+      };
+
+      const saveWorkSession = async (startTime, endTime) => {
+        const duration = Math.floor((endTime - startTime) / 1000);
+        if (duration < 5) return;
+
+        const today = formatDate(new Date());
+        const session = {
+          startTime: startTime.toISOString(),
+          endTime: endTime.toISOString(),
+          duration: duration
+        };
+
+        try {
+          let todaySessions = [];
+          try {
+            const data = await storage.get(`sessions:${today}`);
+            if (data) {
+              todaySessions = JSON.parse(data.value);
+            }
+          } catch (e) {}
+
+          todaySessions.push(session);
+          await storage.set(`sessions:${today}`, JSON.stringify(todaySessions));
+
+          const newStats = { ...stats };
+          newStats.totalTime = (newStats.totalTime || 0) + duration;
+          
+          const yesterday = new Date();
+          yesterday.setDate(yesterday.getDate() - 1);
+          const yesterdayKey = formatDate(yesterday);
+          
+          if (newStats.lastWorkDate === yesterdayKey || newStats.lastWorkDate === today) {
+            if (newStats.lastWorkDate === yesterdayKey) {
+              newStats.streak = (newStats.streak || 0) + 1;
+            }
+          } else if (!newStats.lastWorkDate || newStats.lastWorkDate < yesterdayKey) {
+            newStats.streak = 1;
+          }
+          
+          newStats.lastWorkDate = today;
+          
+          await storage.set('stats', JSON.stringify(newStats));
+          setStats(newStats);
+
+          setSessions(prev => ({
+            ...prev,
+            [today]: todaySessions
+          }));
+
+          const sessionMinutes = Math.floor(duration / 60);
+          const todayTotalMinutes = Math.floor(todaySessions.reduce((sum, s) => sum + s.duration, 0) / 60);
+          sendToDiscord(sessionMinutes, todayTotalMinutes, false);
+
+        } catch (error) {
+          console.error('セッション保存エラー:', error);
+        }
+      };
+
+      useEffect(() => {
+        if (screen === 'idling' || screen === 'choice' || screen === 'working' || screen === 'break') {
+          intervalRef.current = setInterval(() => {
+            setSeconds(prev => prev + 1);
+          }, 1000);
+
+          return () => {
+            if (intervalRef.current) {
+              clearInterval(intervalRef.current);
+            }
+          };
+        }
+      }, [screen]);
+
+      useEffect(() => {
+        if (screen === 'idling' && seconds >= 60) {
+          playBeep();
+          setTimeout(() => {
+            setSeconds(0);
+            setScreen('choice');
+          }, 500);
+        }
+      }, [screen, seconds]);
+
+      useEffect(() => {
+        if (screen === 'choice' && seconds >= 60) {
+          setSeconds(0);
+          // workStartTimeはアイドリング開始時に設定済みなので上書きしない
+          setScreen('working');
+        }
+      }, [screen, seconds]);
+
+      const handleStartIdling = () => {
+        setSeconds(0);
+        setWorkStartTime(new Date()); // アイドリング開始時点から作業時間をカウント
+        setScreen('idling');
+      };
+
+      const handleContinueWork = () => {
+        setSeconds(0);
+        // workStartTimeはアイドリング開始時に設定済みなので上書きしない
+        setScreen('working');
+      };
+
+      const handleTakeBreak = () => {
+        if (screen === 'choice') {
+          // 選択画面でも作業時間を記録（アイドリング1分+選択画面の時間）
+          saveWorkSession(workStartTime, new Date());
+          setSeconds(0);
+          setScreen('break');
+        } else if (screen === 'working') {
+          saveWorkSession(workStartTime, new Date());
+          setSeconds(0);
+          setScreen('break');
+        }
+      };
+
+      const handleEndBreak = () => {
+        setSeconds(0);
+        setScreen('idling');
+      };
+
+      const handleShowStats = () => {
+        setScreen('stats');
+      };
+
+      const handleBackToMain = () => {
+        setScreen('initial');
+      };
+
+      const handleSaveWebhook = async () => {
+        try {
+          await storage.set('discord-webhook-url', webhookInput);
+          setWebhookUrl(webhookInput);
+          showNotification('Webhook URLを保存しました', 'success');
+        } catch (error) {
+          console.error('Webhook保存エラー:', error);
+          showNotification('保存に失敗しました', 'error');
+        }
+      };
+
+      const handleTestWebhook = async () => {
+        if (!webhookInput) {
+          showNotification('Webhook URLを入力してください', 'error');
+          return;
+        }
+        await sendToDiscord(0, 0, true, webhookInput);
+      };
+
+      const getTodayWorkTime = () => {
+        const today = formatDate(new Date());
+        const todaySessions = sessions[today] || [];
+        return todaySessions.reduce((sum, s) => sum + s.duration, 0);
+      };
+
+      const getWeekWorkTime = () => {
+        let total = 0;
+        for (let i = 0; i < 7; i++) {
+          const date = new Date();
+          date.setDate(date.getDate() - i);
+          const dateKey = formatDate(date);
+          const daySessions = sessions[dateKey] || [];
+          total += daySessions.reduce((sum, s) => sum + s.duration, 0);
+        }
+        return total;
+      };
+
+      const getChartData = () => {
+        const data = [];
+        for (let i = 6; i >= 0; i--) {
+          const date = new Date();
+          date.setDate(date.getDate() - i);
+          const dateKey = formatDate(date);
+          const daySessions = sessions[dateKey] || [];
+          const totalMinutes = Math.floor(daySessions.reduce((sum, s) => sum + s.duration, 0) / 60);
+          
+          data.push({
+            date: `${date.getMonth() + 1}/${date.getDate()}`,
+            minutes: totalMinutes
+          });
+        }
+        return data;
+      };
+
+      const CircularTimer = ({ current, max }) => {
+        const radius = 80;
+        const circumference = 2 * Math.PI * radius;
+        const progress = (current / max) * circumference;
+
+        return (
+          <div className="relative w-48 h-48">
+            <svg className="transform -rotate-90 w-full h-full">
+              <circle cx="96" cy="96" r={radius} stroke="#e5e7eb" strokeWidth="8" fill="none" />
+              <circle
+                cx="96" cy="96" r={radius} stroke="#3b82f6" strokeWidth="8" fill="none"
+                strokeDasharray={circumference}
+                strokeDashoffset={circumference - progress}
+                className="transition-all duration-1000 ease-linear"
+              />
+            </svg>
+            <div className="absolute inset-0 flex items-center justify-center">
+              <div className="text-3xl font-bold text-gray-700">{Math.max(0, max - current)}</div>
+            </div>
+          </div>
+        );
+      };
+
+      const SimpleBarChart = ({ data }) => {
+        const maxMinutes = Math.max(...data.map(d => d.minutes), 1);
+        const barWidth = 40;
+        const barSpacing = 10;
+        const chartHeight = 200;
+        
+        return (
+          <div className="w-full">
+            <svg width="100%" height={chartHeight + 40} className="overflow-visible">
+              {data.map((item, index) => {
+                const barHeight = (item.minutes / maxMinutes) * chartHeight;
+                const x = index * (barWidth + barSpacing) + 20;
+                const y = chartHeight - barHeight;
+                
+                return (
+                  <g key={index}>
+                    <rect
+                      x={x}
+                      y={y}
+                      width={barWidth}
+                      height={barHeight}
+                      fill="#3b82f6"
+                      className="hover:fill-blue-700 transition-colors"
+                    />
+                    <text
+                      x={x + barWidth / 2}
+                      y={chartHeight + 20}
+                      textAnchor="middle"
+                      className="text-xs fill-gray-600"
+                    >
+                      {item.date}
+                    </text>
+                    <text
+                      x={x + barWidth / 2}
+                      y={y - 5}
+                      textAnchor="middle"
+                      className="text-xs fill-gray-700 font-semibold"
+                    >
+                      {item.minutes}分
+                    </text>
+                  </g>
+                );
+              })}
+            </svg>
+          </div>
+        );
+      };
+
+      if (screen === 'initial') {
+        return (
+          <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex flex-col items-center justify-center p-4">
+            <div className="bg-white rounded-3xl shadow-2xl p-8 max-w-md w-full">
+              <h1 className="text-3xl font-bold text-gray-800 text-center mb-4">アイドリングタイマー</h1>
+              <p className="text-gray-600 text-center mb-8">まず1分だけ、動き出してみよう</p>
+              
+              <button onClick={handleStartIdling} className="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-4 px-6 rounded-xl text-lg transition-colors mb-4">
+                アイドリングを開始
+              </button>
+
+              <button onClick={handleShowStats} className="w-full bg-gray-200 hover:bg-gray-300 text-gray-700 font-bold py-3 px-6 rounded-xl transition-colors mb-4">
+                統計を見る
+              </button>
+
+              <div className="flex items-center justify-center space-x-3 mt-6">
+                <label className="text-gray-600 text-sm">通知音</label>
+                <button onClick={() => setSoundEnabled(!soundEnabled)} className={`w-14 h-8 rounded-full transition-colors ${soundEnabled ? 'bg-blue-500' : 'bg-gray-300'}`}>
+                  <div className={`w-6 h-6 bg-white rounded-full transition-transform ${soundEnabled ? 'translate-x-7' : 'translate-x-1'}`} />
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      }
+
+      if (screen === 'idling') {
+        return (
+          <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex flex-col items-center justify-center p-4">
+            <div className="bg-white rounded-3xl shadow-2xl p-8 max-w-md w-full">
+              <h2 className="text-2xl font-bold text-gray-800 text-center mb-6">アイドリング中</h2>
+              <div className="flex justify-center mb-6"><CircularTimer current={seconds} max={60} /></div>
+              <p className="text-gray-600 text-center mb-4">まず1分だけ作業してみよう</p>
+              <div className="text-center text-sm text-gray-500">{seconds < 60 ? '1分経過後、選択画面に移動します' : ''}</div>
+            </div>
+          </div>
+        );
+      }
+
+      if (screen === 'choice') {
+        const opacity = Math.max(0, 1 - (seconds / 40));
+
+        return (
+          <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 flex flex-col items-center justify-center p-4">
+            <div className="bg-white rounded-3xl shadow-2xl p-8 max-w-md w-full">
+              <h2 className="text-2xl font-bold text-gray-800 text-center mb-6">どうする?</h2>
+              <p className="text-gray-600 text-center mb-8 transition-opacity duration-1000" style={{ opacity }}>調子が出てきたら続行、疲れたら休憩しよう</p>
+
+              <button onClick={handleContinueWork} className="w-full bg-green-500 hover:bg-green-600 text-white font-bold py-4 px-6 rounded-xl text-lg transition-colors mb-4">
+                今すぐ続行する
+              </button>
+
+              <button onClick={handleTakeBreak} className="w-full bg-orange-400 hover:bg-orange-500 text-white font-bold py-4 px-6 rounded-xl text-lg transition-colors mb-4">
+                休憩する
+              </button>
+
+              <div className="text-center text-sm text-gray-500 mt-4">{seconds < 60 ? `${60 - seconds}秒後に自動的に作業を開始します` : ''}</div>
+            </div>
+          </div>
+        );
+      }
+
+      if (screen === 'working') {
+        return (
+          <div className="min-h-screen bg-gradient-to-br from-green-50 to-emerald-100 flex flex-col items-center justify-center p-4">
+            <div className="bg-white rounded-3xl shadow-2xl p-8 max-w-md w-full">
+              <h2 className="text-2xl font-bold text-gray-800 text-center mb-6">作業中</h2>
+              <div className="text-center mb-8">
+                <div className="text-6xl font-bold text-green-600 mb-2">{formatTime(seconds)}</div>
+                <p className="text-gray-600">経過時間</p>
+              </div>
+              <button onClick={handleTakeBreak} className="w-full bg-orange-400 hover:bg-orange-500 text-white font-bold py-6 px-6 rounded-xl text-xl transition-colors">
+                休憩する
+              </button>
+            </div>
+          </div>
+        );
+      }
+
+      if (screen === 'break') {
+        return (
+          <div className="min-h-screen bg-gradient-to-br from-orange-50 to-amber-100 flex flex-col items-center justify-center p-4">
+            <div className="bg-white rounded-3xl shadow-2xl p-8 max-w-md w-full">
+              <h2 className="text-2xl font-bold text-gray-800 text-center mb-6">休憩中</h2>
+              <div className="text-center mb-8">
+                <div className="text-6xl font-bold text-orange-500 mb-2">{formatTime(seconds)}</div>
+                <p className="text-gray-600">休憩時間</p>
+              </div>
+              <button onClick={handleEndBreak} className="w-full bg-blue-500 hover:bg-blue-600 text-white font-bold py-6 px-6 rounded-xl text-xl transition-colors">
+                休憩終了
+              </button>
+            </div>
+          </div>
+        );
+      }
+
+      if (screen === 'stats') {
+        const todayTime = getTodayWorkTime();
+        const weekTime = getWeekWorkTime();
+        const chartData = getChartData();
+
+        return (
+          <div className="min-h-screen bg-gradient-to-br from-purple-50 to-pink-100 flex flex-col items-center justify-center p-4">
+            {notificationMessage && (
+              <div className={`fixed top-4 right-4 px-6 py-3 rounded-lg shadow-lg z-50 ${notificationMessage.type === 'success' ? 'bg-green-500 text-white' : 'bg-red-500 text-white'}`}>
+                {notificationMessage.message}
+              </div>
+            )}
+
+            <div className="bg-white rounded-3xl shadow-2xl p-8 max-w-2xl w-full max-h-screen overflow-y-auto">
+              <h2 className="text-3xl font-bold text-gray-800 text-center mb-8">作業統計</h2>
+
+              <div className="grid grid-cols-2 gap-4 mb-8">
+                <div className="bg-gradient-to-br from-blue-100 to-blue-200 rounded-xl p-6">
+                  <div className="text-sm text-blue-700 mb-2">今日の作業時間</div>
+                  <div className="text-3xl font-bold text-blue-900">{Math.floor(todayTime / 60)}分</div>
+                </div>
+
+                <div className="bg-gradient-to-br from-green-100 to-green-200 rounded-xl p-6">
+                  <div className="text-sm text-green-700 mb-2">今週の作業時間</div>
+                  <div className="text-3xl font-bold text-green-900">{Math.floor(weekTime / 3600)}時間</div>
+                </div>
+
+                <div className="bg-gradient-to-br from-purple-100 to-purple-200 rounded-xl p-6">
+                  <div className="text-sm text-purple-700 mb-2">総作業時間</div>
+                  <div className="text-3xl font-bold text-purple-900">{Math.floor((stats?.totalTime || 0) / 3600)}時間</div>
+                </div>
+
+                <div className="bg-gradient-to-br from-orange-100 to-orange-200 rounded-xl p-6">
+                  <div className="text-sm text-orange-700 mb-2">連続作業日数</div>
+                  <div className="text-3xl font-bold text-orange-900">{stats?.streak || 0}日</div>
+                </div>
+              </div>
+
+              <div className="mb-8">
+                <h3 className="text-lg font-semibold text-gray-700 mb-4">直近7日間の作業時間</h3>
+                <SimpleBarChart data={chartData} />
+              </div>
+
+              <div className="mb-8 border-t pt-6">
+                <button onClick={() => setShowDiscordSettings(!showDiscordSettings)} className="flex items-center justify-between w-full text-left mb-4">
+                  <h3 className="text-lg font-semibold text-gray-700">Discord連携設定</h3>
+                  <span className="text-gray-500">{showDiscordSettings ? '▼' : '▶'}</span>
+                </button>
+
+                {showDiscordSettings && (
+                  <div className="bg-gray-50 rounded-xl p-6">
+                    <p className="text-sm text-gray-600 mb-4">作業終了時に自動的にDiscordへ記録を送信します</p>
+
+                    <div className="mb-4">
+                      <label className="block text-sm font-medium text-gray-700 mb-2">Webhook URL</label>
+                      <input
+                        type="text"
+                        value={webhookInput}
+                        onChange={(e) => setWebhookInput(e.target.value)}
+                        placeholder="https://discord.com/api/webhooks/..."
+                        className="w-full px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      />
+                    </div>
+
+                    <div className="flex gap-3">
+                      <button onClick={handleSaveWebhook} className="flex-1 bg-blue-500 hover:bg-blue-600 text-white font-bold py-2 px-4 rounded-lg transition-colors">
+                        保存
+                      </button>
+                      <button onClick={handleTestWebhook} className="flex-1 bg-green-500 hover:bg-green-600 text-white font-bold py-2 px-4 rounded-lg transition-colors">
+                        テスト送信
+                      </button>
+                    </div>
+
+                    {webhookUrl && (
+                      <div className="mt-3 text-sm text-green-600 flex items-center">
+                        <span className="mr-2">✓</span>
+                        Webhook URLが設定されています
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              <button onClick={handleBackToMain} className="w-full bg-gray-600 hover:bg-gray-700 text-white font-bold py-3 px-6 rounded-xl transition-colors">
+                戻る
+              </button>
+            </div>
+          </div>
+        );
+      }
+
+      return null;
+    };
+
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<ADHDPomodoroTimer />);
+  </script>
+  <!-- Service Worker登録 -->
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+      navigator.serviceWorker.register('./service-worker.js')
+        .then((registration) => {
+          console.log('ServiceWorker registered:', registration);
+        })
+        .catch((error) => {
+          console.log('ServiceWorker registration failed:', error);
+        });
+    });
+  }
+</script>
+</body>
+</html>
