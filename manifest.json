@@ -2,7 +2,7 @@
   "name": "ADHD ポモドーロタイマー",
   "short_name": "ポモドーロ",
   "description": "ADHD向けポモドーロタイマー - 1分アイドリングで作業開始をサポート",
-  "start_url": "./adhd-pomodoro-simple.html",
+  "start_url": "/pomodoro/",
   "display": "standalone",
   "background_color": "#ffffff",
   "theme_color": "#6366f1",
@@ -23,3 +23,4 @@
   ]
 
 }
+
